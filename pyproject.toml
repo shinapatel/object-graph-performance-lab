@@ -9,6 +9,10 @@ description = "An object-graph performance lab. Later work stays in this reposit
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Shina Patel" }]
+dependencies = [
+    "psycopg[binary]>=3.2,<4",
+    "python-dotenv>=1.0,<2",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
@@ -16,3 +20,6 @@ dev = ["pytest>=8"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "integration: live Postgres via DATABASE_URL; skipped when unset",
+]
