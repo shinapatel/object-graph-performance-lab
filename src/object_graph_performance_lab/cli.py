@@ -1,4 +1,4 @@
-"""Command line for the IMDb load and Experiment 1.
+"""Command line for the IMDb load and the benchmark experiments.
 
     python -m object_graph_performance_lab.cli download
     python -m object_graph_performance_lab.cli init
@@ -6,6 +6,7 @@
     python -m object_graph_performance_lab.cli verify
     python -m object_graph_performance_lab.cli inspect
     python -m object_graph_performance_lab.cli benchmark --experiment local-vs-remote
+    python -m object_graph_performance_lab.cli benchmark --experiment cached-python-vs-sqlite
 """
 
 from __future__ import annotations
@@ -15,7 +16,20 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from object_graph_performance_lab.benchmarks.report import format_summary, write_csv, write_json
+from object_graph_performance_lab.benchmarks.cached_experiment import (
+    prepare_sqlite,
+    run_cached_experiment,
+)
+from object_graph_performance_lab.benchmarks.graph_workloads import (
+    PREFIX_TITLE_COUNT,
+    select_graph_workloads,
+)
+from object_graph_performance_lab.benchmarks.report import (
+    format_cached_summary,
+    format_summary,
+    write_csv,
+    write_json,
+)
 from object_graph_performance_lab.benchmarks.runner import (
     INITIAL_CONNECTION_NOTE,
     open_measured_engine,
@@ -119,7 +133,10 @@ def _build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument(
         "--experiment",
         required=True,
-        help="experiment name; local-vs-remote compares SQLite with remote Postgres",
+        help=(
+            "experiment name. local-vs-remote compares SQLite with remote Postgres. "
+            "cached-python-vs-sqlite compares a warm Python skeleton with warm SQLite."
+        ),
     )
     benchmark.add_argument(
         "--iterations",
@@ -334,25 +351,32 @@ def _cmd_reset(args: argparse.Namespace) -> int:
     return 0
 
 
-def _benchmark_output_paths(args: argparse.Namespace) -> tuple[Path, Path]:
+def _benchmark_output_paths(args: argparse.Namespace, prefix: str) -> tuple[Path, Path]:
     if args.json is not None and args.csv is not None:
         return args.json, args.csv
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     directory = repo_root() / "artifacts" / "benchmarks"
-    json_path = args.json or directory / f"local-vs-remote-{stamp}.json"
-    csv_path = args.csv or directory / f"local-vs-remote-{stamp}.csv"
+    json_path = args.json or directory / f"{prefix}-{stamp}.json"
+    csv_path = args.csv or directory / f"{prefix}-{stamp}.csv"
     return json_path, csv_path
 
 
 def _cmd_benchmark(args: argparse.Namespace) -> int:
-    if args.experiment != "local-vs-remote":
-        raise LabError(
-            f"Unknown experiment {args.experiment!r}. Choose: local-vs-remote"
-        )
     if args.iterations < 2:
         raise LabError("iterations must be at least 2 so the standard deviation is defined")
     if args.warmup < 0:
         raise LabError("warmup must be at least 0")
+    if args.experiment == "local-vs-remote":
+        return _cmd_local_vs_remote(args)
+    if args.experiment == "cached-python-vs-sqlite":
+        return _cmd_cached_python(args)
+    raise LabError(
+        f"Unknown experiment {args.experiment!r}. "
+        "Choose: local-vs-remote, cached-python-vs-sqlite"
+    )
+
+
+def _cmd_local_vs_remote(args: argparse.Namespace) -> int:
     workloads = select_workloads(args.workload)
     if database_url() is None:
         raise LabError(
@@ -391,10 +415,49 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     finally:
         sqlite_engine.target.close()
 
-    json_path, csv_path = _benchmark_output_paths(args)
+    json_path, csv_path = _benchmark_output_paths(args, "local-vs-remote")
     write_json(report, json_path)
     write_csv(report, csv_path)
     print(format_summary(report), flush=True)
+    print(f"json: {json_path}", flush=True)
+    print(f"csv: {csv_path}", flush=True)
+    return 0
+
+
+def _cmd_cached_python(args: argparse.Namespace) -> int:
+    workloads = select_graph_workloads(args.workload)
+    if args.iterations < 30:
+        print(
+            "note: fewer than 30 measured iterations. The documented comparison uses at least 30.",
+            file=sys.stderr,
+        )
+    target = connect_sqlite(sqlite_path(), readonly=True)
+    try:
+        prepare_sqlite(target)
+        if any(workload.expected_rows is not None for workload in workloads):
+            row = target.fetchone("SELECT COUNT(*) FROM titles")
+            title_count = 0 if row is None else int(row[0])
+            if title_count != PREFIX_TITLE_COUNT:
+                raise LabError(
+                    "cached-python-vs-sqlite defaults are fixed for the "
+                    f"{PREFIX_TITLE_COUNT}-title prefix. This database has "
+                    f"{title_count} titles. Refusing to report a comparison "
+                    "for a different result size."
+                )
+        report = run_cached_experiment(
+            experiment=args.experiment,
+            workloads=workloads,
+            target=target,
+            iterations=args.iterations,
+            warmup=args.warmup,
+        )
+    finally:
+        target.close()
+
+    json_path, csv_path = _benchmark_output_paths(args, "cached-python-vs-sqlite")
+    write_json(report, json_path)
+    write_csv(report, csv_path)
+    print(format_cached_summary(report), flush=True)
     print(f"json: {json_path}", flush=True)
     print(f"csv: {csv_path}", flush=True)
     return 0

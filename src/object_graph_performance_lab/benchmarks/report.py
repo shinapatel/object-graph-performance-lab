@@ -136,3 +136,70 @@ def _append_connection_notes(lines: list[str], report: dict) -> None:
             ]
         )
     lines.extend(["", f"Parity validation passed: {report['parity_passed']}"])
+
+
+def format_cached_summary(report: dict) -> str:
+    """Terminal summary for cached Python versus SQLite.
+
+    Python/SQLite is the cached Python median divided by the SQLite median.
+    A ratio above 1 means the SQLite request was faster.
+    """
+    skeleton = report["skeleton"]
+    lines = [
+        (
+            f"Skeleton initialization: {skeleton['initialization_ms']:.3f} ms "
+            "(excluded from request samples)"
+        ),
+        (
+            f"Skeleton traced peak: {skeleton['traced_peak_bytes']} bytes; "
+            f"traced retained: {skeleton['traced_retained_bytes']} bytes"
+        ),
+        (
+            "Process RSS before load: "
+            f"{_bytes(skeleton['rss_before_bytes'])}; after load: "
+            f"{_bytes(skeleton['rss_after_bytes'])}"
+        ),
+        "",
+    ]
+    for workload in report["workloads"]:
+        python_stats = workload["engines"]["cached_python"]
+        sqlite_stats = workload["engines"]["sqlite"]
+        lines.append(
+            f"{workload['name']}  rows={workload['rows_returned']}  "
+            f"selectivity={workload['selectivity_label']}  "
+            f"python_examined={workload['python_records_examined']}  "
+            f"python_objects={workload['python_objects_materialized']}  "
+            f"sqlite_title_rows={workload['sqlite_title_rows_fetched']}  "
+            f"sqlite_crew_rows={workload['sqlite_crew_rows_fetched']}  "
+            f"sqlite_objects={workload['sqlite_objects_materialized']}"
+        )
+        lines.append(f"  cached_python  {_stats_line(python_stats)}")
+        lines.append(f"  sqlite         {_stats_line(sqlite_stats)}")
+        lines.append(
+            f"  Python/SQLite  {workload['median_ratio_python_over_sqlite']:.2f}"
+        )
+        lines.append("")
+    lines.extend(
+        [
+            "Python/SQLite is the cached Python median divided by the SQLite median.",
+            "A ratio above 1 means the SQLite request was faster.",
+            f"Parity validation passed: {report['parity_passed']}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _stats_line(stats: dict) -> str:
+    return (
+        f"median {stats['median_ms']:.3f} ms  "
+        f"p95 {stats['p95_ms']:.3f}  "
+        f"min {stats['min_ms']:.3f}  "
+        f"max {stats['max_ms']:.3f}  "
+        f"stdev {stats['stdev_ms']:.3f}"
+    )
+
+
+def _bytes(value: int | None) -> str:
+    if value is None:
+        return "unavailable"
+    return f"{value} bytes"
