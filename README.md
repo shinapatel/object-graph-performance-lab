@@ -2,9 +2,9 @@
 
 An independent public-data demonstration. It loads a subset of the [IMDb non-commercial datasets](https://developer.imdb.com/non-commercial-datasets/) into local SQLite and, when you configure one, a remote Neon Postgres database. Later work stays in this same repository.
 
-This project is not a reproduction of an employer's systems. It does not ship benchmark numbers.
+This project is not a reproduction of an employer's systems, and it is not a comparison against Rippling's legacy Python Object Graph. The repository does not ship a canned timing table. Experiment 1 measures one run and prints those measurements.
 
-Phase 1 is the download, schema, ingest, consistency check, and inspect path. Later phases will cover SQLite versus remote Postgres, Python filtering versus SQL pushdown, and Django ORM versus raw SQL. Those are not implemented.
+Phase 1 is the download, schema, ingest, consistency check, and inspect path. Experiment 1 compares query latency on embedded SQLite with the same queries on remote Postgres. Python filtering versus SQL pushdown, and Django ORM versus raw SQL, are not implemented.
 
 ## What Phase 1 stores
 
@@ -141,6 +141,38 @@ Indexes: title type, release year, vote count, person id, and role, plus the pri
 `ingest_state` records the subset limit, strategy, source file sizes, and whether the load completed. It is not title data.
 
 SQLite enforces foreign keys only for connections that set the pragma. This program sets it every time it opens the file. PostgreSQL enforces them by default. SQLite uses WAL so the file can be reopened after the process exits.
+
+## Experiment 1: SQLite versus remote Postgres
+
+This compares one process talking to embedded SQLite with the same process talking to Neon Postgres over the network. It is an architectural demonstration on the public IMDb subset. It is not a reproduction of Rippling's Object Graph benchmarks.
+
+Run it after Phase 1 has loaded the same 10,000-title prefix into both databases:
+
+```bash
+python -m object_graph_performance_lab.cli benchmark --experiment local-vs-remote --iterations 50 --warmup 10
+```
+
+Optional flags: repeat `--workload` to run one workload, and pass `--json` and `--csv` to choose output paths. The default writes both files under `artifacts/benchmarks/`, which is gitignored. The command exits nonzero if Postgres is not configured, a query fails, or the two databases do not return the same rows. It does not ingest, reset, or modify stored rows.
+
+Workloads, in order:
+
+| Workload | What it asks | Predicate on this 10,000-title prefix |
+| --- | --- | --- |
+| `primary_key_lookup` | One title by id | `title_id = tt0000001` (1 row) |
+| `selective_query` | A small indexed slice | `release_year = 1900` (85 rows) |
+| `relationship_lookup` | Crew for one title, joined to the title | `title_id = tt0005408` (21 crew rows) |
+| `larger_result_set` | A few thousand titles | `type = movie` (4,200 rows) |
+| `connection_establishment` | A new connection plus `SELECT 1` | Steady state, after warmup |
+
+The SQL text is the same on both engines. PostgreSQL receives `%s` placeholders because the driver layer rewrites `?`. `is_adult` is an integer in SQLite and a boolean in PostgreSQL; the parity check maps both to 0 or 1. Each statement has an equivalent index already created in Phase 1 (primary key, release year, title type, or the crew primary key). No index was added for this experiment.
+
+Timings use `time.perf_counter_ns()`. Each sample covers executing the statement and fetching the rows into a Python list. The same connection is reused for the query workloads. Warmup iterations run first and are discarded. Measured iterations alternate which engine goes first. The run records median, p95, minimum, maximum, and sample standard deviation in milliseconds, plus the row count. p95 is a linear interpolation: the rank is `0.95 * (n - 1)`. A failed iteration aborts the run instead of being removed. Parity is checked before the table is printed, and again on every measured iteration.
+
+Connection setup is a separate workload. The first connection of the process is also recorded and then left out of those steady-state samples. That first connection is not a controlled Neon scale-to-zero cold start. Letting Neon suspend, then connecting once, would be a different measurement and is not mixed into the medians.
+
+How to read the table: `PG/SQLite` is the Postgres median divided by the SQLite median. A large ratio on the primary-key lookup usually means driver overhead and a network round trip dominate a tiny query. A smaller ratio on the larger result set means more of the time is spent moving rows, while SQLite is still reading local pages. Do not treat the ratio as pure network latency. The engines have different planners, caches, drivers, and hardware. Neon's compute size is not matched to the SQLite process. Page cache from the warmup, and from anything else that touched the database earlier in the same session, affects both sides.
+
+JSON keeps every sample, the summary statistics, dataset counts, the parity flag, query plans, and these limitations. CSV keeps one row per measured iteration so the summaries can be recomputed.
 
 ## What stays out of Git
 
