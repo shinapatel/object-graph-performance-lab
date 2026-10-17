@@ -2,9 +2,9 @@
 
 An independent public-data demonstration. It loads a subset of the [IMDb non-commercial datasets](https://developer.imdb.com/non-commercial-datasets/) into local SQLite and, when you configure one, a remote Neon Postgres database. Later work stays in this same repository.
 
-This project is not a reproduction of an employer's systems, and it is not a comparison against Rippling's legacy Python Object Graph. The repository does not ship a canned timing table. Experiment 1 measures one run and prints those measurements.
+This project is not a reproduction of an employer's systems or of Rippling's proprietary Object Graph. Experiment 2 is an independent, legacy-inspired reconstruction on public IMDb data. It is not Rippling's implementation, and it is not a historical measurement. The repository does not ship a canned timing table. Each benchmark command measures one run and prints those measurements.
 
-Phase 1 is the download, schema, ingest, consistency check, and inspect path. Experiment 1 compares query latency on embedded SQLite with the same queries on remote Postgres. Python filtering versus SQL pushdown, and Django ORM versus raw SQL, are not implemented.
+Phase 1 is the download, schema, ingest, consistency check, and inspect path. Experiment 1 compares query latency on embedded SQLite with the same queries on remote Postgres. Experiment 2 compares a warm cached Python skeleton with warm SQLite query pushdown. Django ORM versus raw SQL is not implemented.
 
 ## What Phase 1 stores
 
@@ -173,6 +173,44 @@ Connection setup is a separate workload. The first connection of the process is 
 How to read the table: `PG/SQLite` is the Postgres median divided by the SQLite median. A large ratio on the primary-key lookup usually means driver overhead and a network round trip dominate a tiny query. A smaller ratio on the larger result set means more of the time is spent moving rows, while SQLite is still reading local pages. Do not treat the ratio as pure network latency. The engines have different planners, caches, drivers, and hardware. Neon's compute size is not matched to the SQLite process. Page cache from the warmup, and from anything else that touched the database earlier in the same session, affects both sides.
 
 JSON keeps every sample, the summary statistics, dataset counts, the parity flag, query plans, and these limitations. CSV keeps one row per measured iteration so the summaries can be recomputed.
+
+## Experiment 2: cached Python versus SQLite
+
+This compares two ways to serve the same local metadata.
+
+The cached Python path loads title rows, rating fields, and crew links into a skeleton once. It keeps that skeleton for the whole run. A full-graph request returns the cached sequence. A scoped request probes a `title_id` dictionary. A contextual filter walks the cached titles and keeps references to the records that match. It does not query PostgreSQL, and it does not rebuild the skeleton per request.
+
+The SQLite path reuses the Phase 1 database as the precomputed artifact. Each request applies the same predicate in SQL, fetches the matching rows, and constructs records only for those matches.
+
+Both paths return the same record shape: title fields, rating fields, a flag for whether a ratings row exists, and crew pairs ordered by role then person id. The command exits nonzero when the results differ, and it does not write a success report for that run.
+
+```bash
+python -m object_graph_performance_lab.cli benchmark --experiment cached-python-vs-sqlite --iterations 50 --warmup 10
+```
+
+Optional flags: repeat `--workload` to run one workload, and pass `--json` and `--csv` to choose output paths. The default writes both files under `artifacts/benchmarks/`, which is gitignored. The command does not ingest, reset, or modify stored rows. It does not open Postgres.
+
+Workloads, in catalog order, on the 10,000-title prefix:
+
+| Workload | What it asks | Result size |
+| --- | --- | --- |
+| `full_graph` | Every stored title, with no selective predicate | 10,000 rows (100%) |
+| `scoped_graph` | Every 200th title id, in title-id order | 50 rows (0.50%) |
+| `filter_year_1900` | `release_year = 1900` | 85 rows (0.85%) |
+| `filter_rated_since_1916` | `release_year >= 1916` and a ratings row | 1,012 rows (10.12%) |
+| `filter_type_movie` | `type = movie` | 4,200 rows (42%) |
+
+The defaults are refused when the SQLite file does not contain 10,000 titles. Rating availability means a row in `ratings`. That row can still have a NULL average and a NULL vote count. A NULL release year fails `release_year >= N` on both sides.
+
+Timings use `time.perf_counter_ns()`. Each sample is one complete request: the Python filter or the SQL execution, the fetch, and record construction. Skeleton loading, connection setup, scoped-id selection, warmup, parity checks, and `EXPLAIN QUERY PLAN` are outside the samples. The skeleton stays in memory. Warmup iterations run first and are discarded. Measured iterations alternate which side goes first. The run records median, p95, minimum, maximum, and sample standard deviation. p95 uses rank `0.95 * (n - 1)`. A failed iteration aborts the run. The documented procedure uses at least 10 warmup iterations and at least 30 measured iterations; the comparison command above uses 50.
+
+The terminal output also prints skeleton initialization time, traced Python allocation, and process RSS before and after the load. Initialization time includes the tracer. It is not compared with creating the SQLite file. Traced peak includes temporary row lists. Traced retained is what the skeleton still references. RSS is the whole process, including the interpreter and the SQLite page cache.
+
+How to read `Python/SQLite`: it is the cached Python median divided by the SQLite median. A ratio above 1 means the SQLite request was faster. A ratio below 1 means the cached Python request was faster. The full-graph Python request returns an existing sequence, so it does little work. The SQLite request reads and allocates. A scoped Python request is a dictionary probe. A contextual Python filter scans every cached title; SQLite can use `idx_titles_release_year`, `idx_titles_type`, and the ratings primary key. No index was added for this experiment, and Python does not grow extra indexes for type or year.
+
+The engines do different work once the cache exists. Python reuses objects. SQLite constructs new ones and can avoid touching non-matching rows when an index applies. Page cache from the skeleton load, and from warmup, affects SQLite. At 10,000 titles a Python scan is small. A larger catalog can move the crossover. Do not read the ratio as a claim about Rippling's Object Graph.
+
+JSON keeps every sample, the skeleton measurements, selectivity, rows examined and materialized, query plans, and these limitations. CSV keeps one row per measured iteration.
 
 ## What stays out of Git
 
