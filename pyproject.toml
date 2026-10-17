@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "object-graph-performance-lab"
 version = "0.1.0"
 description = "An object-graph performance lab. Later work stays in this repository."
+readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Shina Patel" }]
 
