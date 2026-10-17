@@ -1,27 +1,39 @@
-"""Command line for the Phase 1 IMDb load.
+"""Command line for the IMDb load and Experiment 1.
 
     python -m object_graph_performance_lab.cli download
     python -m object_graph_performance_lab.cli init
     python -m object_graph_performance_lab.cli ingest --limit 10000
     python -m object_graph_performance_lab.cli verify
     python -m object_graph_performance_lab.cli inspect
+    python -m object_graph_performance_lab.cli benchmark --experiment local-vs-remote
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 
+from object_graph_performance_lab.benchmarks.report import format_summary, write_csv, write_json
+from object_graph_performance_lab.benchmarks.runner import (
+    INITIAL_CONNECTION_NOTE,
+    open_measured_engine,
+    run_comparison,
+)
+from object_graph_performance_lab.benchmarks.workloads import select_workloads
 from object_graph_performance_lab.config import (
     DEFAULT_LIMIT,
     database_url,
     raw_dir,
     redact_database_url,
+    repo_root,
     sqlite_path,
     standard_datasets,
 )
 from object_graph_performance_lab.db import (
     connect_postgres,
+    connect_sqlite,
     open_postgres_target,
     open_sqlite_target,
     probe,
@@ -98,6 +110,46 @@ def _build_parser() -> argparse.ArgumentParser:
         "--include-downloads",
         action="store_true",
         help="also delete the cached IMDb files under data/raw/",
+    )
+
+    benchmark = sub.add_parser(
+        "benchmark",
+        help="compare read-only query latency for one experiment",
+    )
+    benchmark.add_argument(
+        "--experiment",
+        required=True,
+        help="experiment name; local-vs-remote compares SQLite with remote Postgres",
+    )
+    benchmark.add_argument(
+        "--iterations",
+        type=int,
+        default=50,
+        help="measured iterations per workload and engine (default 50, minimum 2)",
+    )
+    benchmark.add_argument(
+        "--warmup",
+        type=int,
+        default=10,
+        help="unrecorded iterations per workload and engine before measuring (default 10)",
+    )
+    benchmark.add_argument(
+        "--workload",
+        action="append",
+        default=None,
+        help="run only this workload; repeat the flag to choose several",
+    )
+    benchmark.add_argument(
+        "--json",
+        type=Path,
+        default=None,
+        help="write the full report here (default: artifacts/benchmarks/)",
+    )
+    benchmark.add_argument(
+        "--csv",
+        type=Path,
+        default=None,
+        help="write one row per measured sample here (default: artifacts/benchmarks/)",
     )
     return parser
 
@@ -282,6 +334,72 @@ def _cmd_reset(args: argparse.Namespace) -> int:
     return 0
 
 
+def _benchmark_output_paths(args: argparse.Namespace) -> tuple[Path, Path]:
+    if args.json is not None and args.csv is not None:
+        return args.json, args.csv
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    directory = repo_root() / "artifacts" / "benchmarks"
+    json_path = args.json or directory / f"local-vs-remote-{stamp}.json"
+    csv_path = args.csv or directory / f"local-vs-remote-{stamp}.csv"
+    return json_path, csv_path
+
+
+def _cmd_benchmark(args: argparse.Namespace) -> int:
+    if args.experiment != "local-vs-remote":
+        raise LabError(
+            f"Unknown experiment {args.experiment!r}. Choose: local-vs-remote"
+        )
+    if args.iterations < 2:
+        raise LabError("iterations must be at least 2 so the standard deviation is defined")
+    if args.warmup < 0:
+        raise LabError("warmup must be at least 0")
+    workloads = select_workloads(args.workload)
+    if database_url() is None:
+        raise LabError(
+            "DATABASE_URL is not set. local-vs-remote needs the local SQLite file and Postgres."
+        )
+    if args.iterations < 30:
+        print(
+            "note: fewer than 30 measured iterations. The documented comparison uses at least 30.",
+            file=sys.stderr,
+        )
+
+    sqlite_engine, sqlite_initial_ms = open_measured_engine(
+        "sqlite",
+        lambda: connect_sqlite(sqlite_path(), readonly=True),
+    )
+    try:
+        postgres_engine, postgres_initial_ms = open_measured_engine(
+            "postgres",
+            lambda: connect_postgres(database_url() or ""),
+        )
+        try:
+            report = run_comparison(
+                experiment=args.experiment,
+                workloads=workloads,
+                engines=[sqlite_engine, postgres_engine],
+                iterations=args.iterations,
+                warmup=args.warmup,
+                initial_connection={
+                    "sqlite_ms": sqlite_initial_ms,
+                    "postgres_ms": postgres_initial_ms,
+                    "note": INITIAL_CONNECTION_NOTE,
+                },
+            )
+        finally:
+            postgres_engine.target.close()
+    finally:
+        sqlite_engine.target.close()
+
+    json_path, csv_path = _benchmark_output_paths(args)
+    write_json(report, json_path)
+    write_csv(report, csv_path)
+    print(format_summary(report), flush=True)
+    print(f"json: {json_path}", flush=True)
+    print(f"csv: {csv_path}", flush=True)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -292,6 +410,7 @@ def main(argv: list[str] | None = None) -> int:
         "verify": _cmd_verify,
         "inspect": _cmd_inspect,
         "reset": _cmd_reset,
+        "benchmark": _cmd_benchmark,
     }
     try:
         return handlers[args.command](args)
