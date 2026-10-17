@@ -1,0 +1,6 @@
+tconst	titleType	primaryTitle	originalTitle	isAdult	startYear	endYear	runtimeMinutes	genres
+tt0000009	short	Ninth	Ninth	0	1894	\N	1	Documentary,Short
+tt0000001	short	Café, The	Café, The	0	1892	\N	\N	Animation,Short
+tt0000003	movie	Null Year	Null Year	\N	\N	\N	\N	\N
+tt0000002	short	Adult Short	Adult Short	1	1894	\N	5	Short
+tt0000008	tvSeries	Later Show	Later Show	0	2000	2002	40	Drama
